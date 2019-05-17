@@ -74,6 +74,7 @@ class BaseWorker(AbstractWorker, ObjectStorage):
     ):
         """Initializes a BaseWorker."""
         super().__init__()
+
         self.hook = hook
         self.torch = None if hook is None else hook.torch
         self.id = id
@@ -92,6 +93,7 @@ class BaseWorker(AbstractWorker, ObjectStorage):
             codes.MSGTYPE.IS_NONE: self.is_tensor_none,
             codes.MSGTYPE.GET_SHAPE: self.get_tensor_shape,
             codes.MSGTYPE.SEARCH: self.deserialized_search,
+            codes.MSGTYPE.FORCE_OBJ_DEL: self.force_rm_obj,
         }
 
         self.load_data(data)
@@ -179,6 +181,18 @@ class BaseWorker(AbstractWorker, ObjectStorage):
 
         """
         raise NotImplementedError  # pragma: no cover
+
+    def remove_worker_from_registry(self, worker_id):
+        """Removes a worker from the dictionary of known workers.
+        Args:
+            worker_id: id to be removed
+        """
+        del self._known_workers[worker_id]
+
+    def remove_worker_from_local_worker_registry(self):
+        """Removes itself from the registry of hook.local_worker.
+        """
+        self.hook.local_worker.remove_worker_from_registry(worker_id=self.id)
 
     def load_data(self, data: List[Union[torch.Tensor, AbstractTensor]]) -> None:
         """Allows workers to be initialized with data when created
@@ -269,6 +283,8 @@ class BaseWorker(AbstractWorker, ObjectStorage):
         obj: Union[torch.Tensor, AbstractTensor],
         workers: "BaseWorker",
         ptr_id: Union[str, int] = None,
+        local_autograd=False,
+        preinitialize_grad=False,
     ) -> PointerTensor:
         """Sends tensor to the worker(s).
 
@@ -277,11 +293,14 @@ class BaseWorker(AbstractWorker, ObjectStorage):
         remote storage address.
 
         Args:
-            tensor: A syft/torch tensor/object object to send.
+            obj: An object to send.
             workers: A BaseWorker object representing the worker(s) that will
                 receive the object.
             ptr_id: An optional string or integer indicating the remote id of
                 the object on the remote worker(s).
+            local_autograd: Use autograd system on the local machine instead of PyTorch's
+                autograd on the workers.
+            preinitialize_grad: Initialize gradient for AutogradTensors to a tensor
 
         Example:
             >>> import torch
@@ -319,12 +338,19 @@ class BaseWorker(AbstractWorker, ObjectStorage):
 
         if isinstance(obj, torch.Tensor):
             pointer = obj.create_pointer(
-                owner=self, location=worker, id_at_location=obj.id, register=True, ptr_id=ptr_id
+                owner=self,
+                location=worker,
+                id_at_location=obj.id,
+                register=True,
+                ptr_id=ptr_id,
+                local_autograd=local_autograd,
+                preinitialize_grad=preinitialize_grad,
             )
         else:
             pointer = obj
         # Send the object
         self.send_obj(obj, worker)
+
         return pointer
 
     def execute_command(self, message: tuple) -> PointerTensor:
@@ -348,11 +374,14 @@ class BaseWorker(AbstractWorker, ObjectStorage):
                 # retrieve the command from object itself (self)
                 response = getattr(self, command_name)(*args, **kwargs)
             else:
-                if sy.torch.is_inplace_method(command_name):
-                    getattr(_self, command_name)(*args, **kwargs)
-                    return
-                else:
+                try:
                     response = getattr(_self, command_name)(*args, **kwargs)
+                except TypeError:
+                    # TODO Andrew thinks this is gross, please fix. Instead need to properly deserialize strings
+                    new_args = [
+                        arg.decode("utf-8") if isinstance(arg, bytes) else arg for arg in args
+                    ]
+                    response = getattr(_self, command_name)(*new_args, **kwargs)
         # Handle functions
         else:
             # At this point, the command is ALWAYS a path to a
@@ -378,11 +407,14 @@ class BaseWorker(AbstractWorker, ObjectStorage):
                 )
                 return response
             except ResponseSignatureError:
-                return_ids = IdProvider(return_ids)
+                return_id_provider = sy.ID_PROVIDER
+                return_id_provider.set_next_ids(return_ids, check_ids=False)
+                return_id_provider.start_recording_ids()
                 response = sy.frameworks.torch.hook_args.register_response(
-                    command_name, response, return_ids, self
+                    command_name, response, return_id_provider, self
                 )
-                raise ResponseSignatureError(return_ids.generated)
+                new_ids = return_id_provider.get_recorded_ids()
+                raise ResponseSignatureError(new_ids)
 
     def send_command(
         self, recipient: "BaseWorker", message: str, return_ids: str = None
@@ -552,7 +584,7 @@ class BaseWorker(AbstractWorker, ObjectStorage):
             else:
                 if fail_hard:
                     raise WorkerNotFoundException
-                logger.warning("Worker", self.id, "couldn't recognize worker", id_or_worker)
+                logging.warning("Worker %s couldn't recognize worker %s", self.id, id_or_worker)
                 return id_or_worker
         else:
             if id_or_worker.id not in self._known_workers:

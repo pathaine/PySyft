@@ -2,7 +2,9 @@ import torch
 import syft as sy
 from syft.exceptions import RemoteTensorFoundError
 from syft.exceptions import PureTorchTensorFoundError
+
 from syft.exceptions import ResponseSignatureError
+from syft.frameworks.torch.tensors.interpreters import AutogradTensor
 from syft.frameworks.torch.tensors.interpreters import AbstractTensor
 from syft.frameworks.torch.tensors.interpreters import PointerTensor
 from syft.frameworks.torch.tensors.interpreters import TorchTensor
@@ -15,6 +17,7 @@ from typing import Callable
 from typing import Union
 from typing import Tuple
 from typing import List
+
 
 hook_method_args_functions = {}
 hook_method_response_functions = {}
@@ -30,6 +33,7 @@ type_rule = {
     # should perhaps be of type ShareDict extending dict or something like this
     LoggingTensor: one,
     FixedPrecisionTensor: one,
+    AutogradTensor: one,
     AdditiveSharingTensor: one,
     MultiPointerTensor: one,
     PointerTensor: one,
@@ -48,6 +52,7 @@ forward_func = {
     else (_ for _ in ()).throw(PureTorchTensorFoundError),
     LoggingTensor: lambda i: i.child,
     FixedPrecisionTensor: lambda i: i.child,
+    AutogradTensor: lambda i: i.child,
     AdditiveSharingTensor: lambda i: i.child,
     MultiPointerTensor: lambda i: i.child,
     "my_syft_tensor_type": lambda i: i.child,
@@ -61,6 +66,7 @@ backward_func = {
     PointerTensor: lambda i: i,
     LoggingTensor: lambda i: LoggingTensor().on(i, wrap=False),
     FixedPrecisionTensor: lambda i, **kwargs: FixedPrecisionTensor(**kwargs).on(i, wrap=False),
+    AutogradTensor: lambda i: AutogradTensor(data=i).on(i, wrap=False),
     AdditiveSharingTensor: lambda i, **kwargs: AdditiveSharingTensor(**kwargs).on(i, wrap=False),
     MultiPointerTensor: lambda i, **kwargs: MultiPointerTensor(**kwargs).on(i, wrap=False),
     "my_syft_tensor_type": lambda i, **kwargs: "my_syft_tensor_type(**kwargs).on(i, wrap=False)",
@@ -661,27 +667,37 @@ def build_register_response_function(response: object) -> Callable:
 
 def register_tensor(
     tensor: Union[torch.Tensor, AbstractTensor],
+    owner: sy.workers.AbstractWorker,
     response_ids: List = list(),
-    owner: sy.workers.AbstractWorker = None,
-) -> None:
+) -> Union[torch.Tensor, AbstractTensor]:
     """
-    Register a tensor
+    Register a tensor.
 
     Args:
-        tensor: the tensor
-        response_ids: list of ids where the tensor should be stored
+        tensor: A tensor.
+        response_ids: List of ids where the tensor should be stored
             and each id is pop out when needed
-        owner: the owner that makes the registration
+        owner: The owner that makes the registration.
     Returns:
-        the pointer
+        The registered tensor.
     """
-    assert owner is not None
+    # TODO: uncomment these lines.
+    # This is currently need so we can return a tensor
+    # remotely.
+    # tensor.owner = owner
+    # try:
+    #     tensor.id = response_ids.pop(-1)
+    # except IndexError:
+    #     raise ResponseSignatureError
+    # owner.register_obj(tensor)
+
     tensor.owner = owner
-    try:
+    if response_ids:
         tensor.id = response_ids.pop(-1)
-    except IndexError:
-        raise ResponseSignatureError
+    else:
+        tensor.id = sy.ID_PROVIDER.pop()
     owner.register_obj(tensor)
+    return tensor
 
 
 def build_register_response(response: object, rules: Tuple, return_tuple: bool = False) -> Callable:

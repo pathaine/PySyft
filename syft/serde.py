@@ -881,7 +881,14 @@ def _simplify_pointer_tensor(ptr: PointerTensor) -> tuple:
         data = _simplify_pointer_tensor(ptr)
     """
 
-    return (ptr.id, ptr.id_at_location, ptr.location.id, ptr.point_to_attr, ptr._shape)
+    return (
+        ptr.id,
+        ptr.id_at_location,
+        ptr.location.id,
+        ptr.point_to_attr,
+        ptr._shape,
+        ptr.garbage_collect_data,
+    )
 
     # a more general but slower/more verbose option
 
@@ -906,20 +913,16 @@ def _detail_pointer_tensor(worker: AbstractWorker, tensor_tuple: tuple) -> Point
         ptr = _detail_pointer_tensor(data)
     """
     # TODO: fix comment for this and simplifier
-    obj_id = tensor_tuple[0]
-    id_at_location = tensor_tuple[1]
-    worker_id = tensor_tuple[2]
+    obj_id, id_at_location, worker_id, point_to_attr, shape, garbage_collect_data = tensor_tuple
+
     if isinstance(worker_id, bytes):
         worker_id = worker_id.decode()
-    point_to_attr = tensor_tuple[3]
-    shape = tensor_tuple[4]
 
     if shape is not None:
         shape = torch.Size(shape)
 
     # If the pointer received is pointing at the current worker, we load the tensor instead
     if worker_id == worker.id:
-
         tensor = worker.get_obj(id_at_location)
 
         if point_to_attr is not None and tensor is not None:
@@ -952,7 +955,7 @@ def _detail_pointer_tensor(worker: AbstractWorker, tensor_tuple: tuple) -> Point
             owner=worker,
             id=obj_id,
             shape=shape,
-            garbage_collect_data=True,
+            garbage_collect_data=garbage_collect_data,
         )
 
         return ptr
@@ -1123,14 +1126,11 @@ def _detail_train_config(worker: AbstractWorker, train_config_tuple: tuple) -> t
     """
 
     loss_plan, forward_plan, batch_size, epochs, optimizer, lr, id = train_config_tuple
-    id = id
-    if isinstance(id, bytes):
-        id = id.decode("utf-8")
 
+    id = _detail(worker, id)
     detailed_loss_plan = _detail(worker, loss_plan)
     detailed_forward_plan = _detail(worker, forward_plan)
-    if isinstance(optimizer, bytes):
-        optimizer = optimizer.decode("utf-8")
+    detailed_optimizer = _detail(worker, optimizer)
 
     train_config = syft.TrainConfig(
         owner=worker,
@@ -1139,7 +1139,7 @@ def _detail_train_config(worker: AbstractWorker, train_config_tuple: tuple) -> t
         loss_plan=detailed_loss_plan,
         batch_size=batch_size,
         epochs=epochs,
-        optimizer=optimizer,
+        optimizer=detailed_optimizer,
         lr=lr,
     )
 
@@ -1161,7 +1161,7 @@ def _simplify_plan(plan: Plan) -> tuple:
         _simplify(plan.id),
         _simplify(plan.arg_ids),
         _simplify(plan.result_ids),
-        plan.name,
+        _simplify(plan.name),
         _simplify(plan.tags),
         _simplify(plan.description),
     )
@@ -1177,9 +1177,7 @@ def _detail_plan(worker: AbstractWorker, plan_tuple: tuple) -> Plan:
     """
 
     readable_plan, id, arg_ids, result_ids, name, tags, description = plan_tuple
-    id = id
-    if isinstance(id, bytes):
-        id = id.decode("utf-8")
+    id = _detail(worker, id)
     arg_ids = _detail(worker, arg_ids)
     result_ids = _detail(worker, result_ids)
 
@@ -1190,8 +1188,8 @@ def _detail_plan(worker: AbstractWorker, plan_tuple: tuple) -> Plan:
         result_ids=result_ids,
         readable_plan=_detail(worker, readable_plan),
     )
-    if isinstance(name, bytes):
-        plan.name = name.decode("utf-8")
+
+    plan.name = _detail(worker, name)
     plan.tags = _detail(worker, tags)
     plan.description = _detail(worker, description)
 

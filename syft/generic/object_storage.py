@@ -88,11 +88,11 @@ class ObjectStorage:
 
         return obj
 
-    def set_obj(self, obj: Union[torch.Tensor, AbstractTensor]) -> None:
+    def set_obj(self, obj: object) -> None:
         """Adds an object to the registry of objects.
 
         Args:
-            obj: A torch or syft tensor with an id.
+            obj: An object with an id.
         """
         self._objects[obj.id] = obj
 
@@ -106,4 +106,20 @@ class ObjectStorage:
                 removed.
         """
         if remote_key in self._objects:
+            del self._objects[remote_key]
+
+    def force_rm_obj(self, remote_key: Union[str, int]):
+        """Forces object removal.
+
+        Besides removing the object from the permanent object registry if it exists.
+        Explicitly forces removal of the object modifying the `garbage_collect_data` attribute.
+
+        Args:
+            remote_key: A string or integer representing id of the object to be
+                removed.
+        """
+        if remote_key in self._objects:
+            obj = self._objects[remote_key]
+            if hasattr(obj, "child"):
+                obj.child.garbage_collect_data = True
             del self._objects[remote_key]

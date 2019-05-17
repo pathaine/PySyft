@@ -2,7 +2,7 @@ import copy
 import torch
 
 from syft.frameworks.torch.tensors.interpreters.abstract import AbstractTensor
-from syft.workers.base import ObjectStorage
+from syft.generic import ObjectStorage
 from syft.codes import MSGTYPE
 import syft as sy
 
@@ -162,6 +162,7 @@ class Plan(ObjectStorage):
         local_args = list()
         for arg in args:
             # Send only tensors (in particular don't send the "self" for methods)
+            # in the case of a method.
             if isinstance(arg, torch.Tensor):
                 self.owner.register_obj(arg)
                 arg = arg.send(self)
@@ -254,12 +255,20 @@ class Plan(ObjectStorage):
             from_worker_id: Id of the the replaced worker.
             to_worker_id: Id of the new worker.
         """
-        for from_id, to_id in [
-            (from_worker_id, to_worker_id),
-            (from_worker_id.encode(), to_worker_id.encode()),
-        ]:
+        id_pairs = [(from_worker_id, to_worker_id)]
+        if type(from_worker_id) == str:
+            to_worker_id_encoded = (
+                to_worker_id.encode() if type(to_worker_id) == str else to_worker_id
+            )
+            id_pairs.append((from_worker_id.encode(), to_worker_id_encoded))
+
+        for id_pair in id_pairs:
             self.readable_plan = Plan._replace_message_ids(
-                obj=self.readable_plan, change_id=-1, to_id=-1, from_worker=from_id, to_worker=to_id
+                obj=self.readable_plan,
+                change_id=-1,
+                to_id=-1,
+                from_worker=id_pair[0],
+                to_worker=id_pair[1],
             )
 
     @staticmethod
@@ -342,10 +351,19 @@ class Plan(ObjectStorage):
         return responses
 
     def _execute_plan_locally(self, result_ids, *args, **kwargs):
-        self._update_args(args, result_ids)
+        tensor_args = self._keep_only_tensor_args(args)
+        self._update_args(tensor_args, result_ids)
         self._execute_plan()
         responses = self._get_plan_output(result_ids)
         return responses
+
+    def _keep_only_tensor_args(self, args):
+        """Keeps only Tensors in args. This step is needed for method plans."""
+        tensor_args = []
+        for arg in args:
+            if isinstance(arg, torch.Tensor):
+                tensor_args.append(arg)
+        return tensor_args
 
     def execute_plan(self, args: List, result_ids: List[Union[str, int]]):
         """Controls local or remote plan execution.
@@ -370,7 +388,6 @@ class Plan(ObjectStorage):
             worker = self.find_location(args)
             if worker.id not in self.ptr_plans.keys():
                 self.ptr_plans[worker.id] = self._send(worker)
-
             response = self.request_execute_plan(worker, result_ids, *args)
 
             return response
@@ -385,6 +402,8 @@ class Plan(ObjectStorage):
         elif len(self.locations) == 0 and self.owner != sy.hook.local_worker:
             self._update_args(args, result_ids)
             self._execute_plan()
+            responses = self._get_plan_output(result_ids)
+            return responses
 
         return sy.serde.serialize(None)
 
@@ -442,7 +461,6 @@ class Plan(ObjectStorage):
         Args:
             location: Worker where plan should be sent to.
         """
-
         readable_plan_original = copy.deepcopy(self.readable_plan)
         for worker_id in [self.owner.id] + self.locations:
             self.replace_worker_ids(worker_id, location.id)
